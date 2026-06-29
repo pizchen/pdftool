@@ -1,0 +1,8 @@
+pymupdf>=1.24
+
+# Converting Office files (PPTX/DOCX/ODP/ODT/...) to PDF via office2pdf.py
+# requires LibreOffice installed as a SYSTEM package (provides `soffice`).
+# It is NOT a pip/uv dependency and cannot be pinned here; it is not needed for
+# plain PDF work with pdf_tool.py. See README_nup.md ("Office documents -> PDF").
+#   Debian/Ubuntu: apt install libreoffice
+#   macOS:         brew install --cask libreoffice

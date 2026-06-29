@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / IDE / agent
+.cursor/
+.idea/
+.vscode/
+
+# Generated / test PDFs and other large artifacts
+# (this is a CLI tool repo; produced PDFs don't belong in source control.
+#  Use `git add -f sample.pdf` if you ever want to commit a small sample.)
+*.pdf

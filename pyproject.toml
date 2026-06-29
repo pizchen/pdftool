@@ -1,0 +1,18 @@
+[project]
+name = "nup-pdf"
+version = "0.1.0"
+description = "PDF toolkit: N-up plus page operations (merge, extract, delete, reorder, split, rotate) with auto-fit and orientation control."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pymupdf>=1.24",
+]
+# NOTE: office2pdf.py (Office->PDF converter for PPTX/DOCX/...) adds no Python
+# dependency at all - it is pure standard library. Its only requirement is the
+# LibreOffice `soffice` binary, a SYSTEM dependency that pip/uv cannot lock.
+# Install it separately (see README_nup.md); not needed for plain PDF work.
+
+# These are single-file script tools, not an installable library, so don't try
+# to build/install the project itself - uv just manages the dependencies.
+[tool.uv]
+package = false
