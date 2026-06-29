@@ -11,6 +11,7 @@ Subcommands:
   split     Split a PDF into multiple files (per N pages, or by explicit ranges).
   rotate    Rotate selected pages by a multiple of 90 degrees.
   info      Print page count, sizes, rotation and metadata.
+  bookmark  Read or edit bookmarks (list/add/delete/update/export/import).
 
 Single dependency (PyMuPDF). Page specs are 1-based, e.g. "1-3,5,8-". The page
 operations always write a NEW file; an input is never overwritten.
@@ -37,10 +38,17 @@ Examples:
     python3 pdf_tool.py rotate  -i in.pdf --flip               # 180 (upside down)
     python3 pdf_tool.py rotate  -i in.pdf --angle 270 -p 1     # explicit angle
     python3 pdf_tool.py info    -i in.pdf --per-page
+    python3 pdf_tool.py bookmark list   -i in.pdf
+    python3 pdf_tool.py bookmark add    -i in.pdf --add 1 1 "Chapter 1" --add 2 2 "Section 1.1"
+    python3 pdf_tool.py bookmark delete -i in.pdf --index 2,4-6
+    python3 pdf_tool.py bookmark update -i in.pdf --index 3 --title "New title"
+    python3 pdf_tool.py bookmark export -i in.pdf -o toc.json
+    python3 pdf_tool.py bookmark import -i in.pdf --from toc.json
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -695,6 +703,333 @@ def cmd_info(args: argparse.Namespace) -> None:
         doc.close()
 
 
+# --------------------------------------------------------------------------- #
+# Bookmarks (PDF outline / table of contents).
+#
+# PyMuPDF stores the outline as a flat list of [level, title, page] rows
+# (1-based pages; page -1 means "no destination"). The 1-based `level` encodes
+# the tree: the first row must be level 1 and each row may deepen the level by
+# at most 1. Every editing action writes a NEW pdf; the input is never modified.
+# --------------------------------------------------------------------------- #
+def get_bookmarks(doc: "pymupdf.Document") -> list:
+    """Return the document outline as a list of [level, title, page] rows."""
+    return doc.get_toc(simple=True)
+
+
+def validate_bookmarks(toc: list, total: int) -> None:
+    """Validate a TOC before applying it, raising clear 1-based row errors.
+
+    Checks positive integer levels, a legal hierarchy (the first row is level 1
+    and each level steps up by at most 1) and page numbers in 1..total (or -1 for
+    "no destination"). Without this, set_toc would clamp out-of-range pages
+    silently and give only a terse hierarchy message.
+    """
+    prev = 0
+    for i, entry in enumerate(toc):
+        row = i + 1
+        level, title, page = entry[0], entry[1], entry[2]
+        if not isinstance(level, int) or level < 1:
+            raise ValueError(f"bookmark row {row}: level must be an integer >= 1 (got {level!r}).")
+        if level > prev + 1:
+            raise ValueError(
+                f"bookmark row {row} ('{title}'): level {level} jumps from {prev}; the "
+                f"first bookmark must be level 1 and each level may only increase by 1."
+            )
+        if not isinstance(page, int):
+            raise ValueError(f"bookmark row {row} ('{title}'): page must be an integer (got {page!r}).")
+        if page != -1 and not (1 <= page <= total):
+            raise ValueError(
+                f"bookmark row {row} ('{title}'): page {page} is out of range 1..{total} "
+                f"(use -1 for a bookmark with no page destination)."
+            )
+        prev = level
+
+
+def parse_index_spec(spec: str, n: int) -> list:
+    """Parse a 1-based bookmark-index spec ('3', '2,4-6', 'all') into 0-based indices."""
+    return parse_pages(spec, n)
+
+
+def write_toc(doc: "pymupdf.Document", toc: list, output: str) -> None:
+    """Validate `toc`, set it as the outline, and save to `output` (a new file)."""
+    validate_bookmarks(toc, doc.page_count)
+    doc.set_toc(toc)
+    save_new(doc, output)
+
+
+def default_bookmark_output(args: argparse.Namespace) -> str:
+    """Default a missing -o for bookmark write actions to <input>_bookmarks.pdf."""
+    if not getattr(args, "output", None):
+        base, _ = os.path.splitext(args.input)
+        args.output = f"{base}_bookmarks.pdf"
+    return args.output
+
+
+def _bookmark_loc(page: object) -> str:
+    """Human-readable label for a bookmark's page destination."""
+    return f"p.{page}" if isinstance(page, int) and page > 0 else "no dest"
+
+
+def cmd_bm_list(args: argparse.Namespace) -> None:
+    doc = open_pdf(args.input)
+    try:
+        toc = get_bookmarks(doc)
+        if args.json:
+            data = [
+                {"index": i + 1, "level": lvl, "title": title, "page": page}
+                for i, (lvl, title, page) in enumerate(toc)
+            ]
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+            return
+        if not toc:
+            print("(no bookmarks)")
+            return
+        width = len(str(len(toc)))
+        for i, (lvl, title, page) in enumerate(toc):
+            indent = "  " * (lvl - 1)
+            print(f"{i + 1:>{width}}: {indent}{title}  ({_bookmark_loc(page)})")
+    finally:
+        doc.close()
+
+
+def _jsonify_dest(dest: dict) -> dict:
+    """Make a detailed get_toc dest dict JSON-serializable (Point -> [x, y])."""
+    out: dict = {}
+    for key, val in dest.items():
+        if hasattr(val, "x") and hasattr(val, "y"):  # pymupdf.Point
+            out[key] = [val.x, val.y]
+        else:
+            out[key] = val
+    return out
+
+
+def cmd_bm_export(args: argparse.Namespace) -> None:
+    doc = open_pdf(args.input)
+    try:
+        if args.details:
+            data = []
+            for entry in doc.get_toc(simple=False):
+                lvl, title, page = entry[0], entry[1], entry[2]
+                dest = entry[3] if len(entry) > 3 else {}
+                data.append({"level": lvl, "title": title, "page": page,
+                             "dest": _jsonify_dest(dest)})
+        else:
+            data = [{"level": lvl, "title": title, "page": page}
+                    for lvl, title, page in get_bookmarks(doc)]
+    finally:
+        doc.close()
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    out = args.output
+    if not out:
+        base, _ = os.path.splitext(args.input)
+        out = f"{base}_bookmarks.json"
+    if out == "-":
+        print(text)
+        return
+    ensure_not_input(out, args.input)
+    parent = os.path.dirname(os.path.abspath(out))
+    os.makedirs(parent, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+    print(f"Exported {len(data)} bookmark(s) -> {out}")
+
+
+def _insert_sorted_by_page(toc: list, entry: list) -> None:
+    """Insert `entry` into `toc` (in place) keeping it ordered by page (stable).
+
+    No-destination entries (page -1) sort to the end. The new entry goes before
+    the first existing row whose page is strictly greater.
+    """
+    page = entry[2]
+    key = page if (isinstance(page, int) and page > 0) else float("inf")
+    insert_at = len(toc)
+    for i, existing in enumerate(toc):
+        ep = existing[2]
+        ekey = ep if (isinstance(ep, int) and ep > 0) else float("inf")
+        if ekey > key:
+            insert_at = i
+            break
+    toc.insert(insert_at, entry)
+
+
+def cmd_bm_add(args: argparse.Namespace) -> None:
+    if not args.add:
+        raise ValueError('Provide at least one --add PAGE LEVEL "TITLE".')
+    default_bookmark_output(args)
+    ensure_not_input(args.output, args.input)
+    doc = open_pdf(args.input)
+    try:
+        total = doc.page_count
+        toc = [list(e) for e in get_bookmarks(doc)]
+        new_entries = []
+        for page_s, level_s, title in args.add:
+            try:
+                page, level = int(page_s), int(level_s)
+            except ValueError:
+                raise ValueError(
+                    f'--add expects PAGE LEVEL "TITLE" with integer PAGE and LEVEL; '
+                    f"got PAGE={page_s!r} LEVEL={level_s!r}."
+                )
+            if page != -1 and not (1 <= page <= total):
+                raise ValueError(f"--add page {page} out of range 1..{total} (use -1 for no destination).")
+            if level < 1:
+                raise ValueError(f"--add level {level} must be >= 1.")
+            new_entries.append([level, title, page])
+
+        if args.at is not None:
+            pos = args.at - 1
+            if not (0 <= pos <= len(toc)):
+                raise ValueError(f"--at {args.at} out of range 1..{len(toc) + 1}.")
+            toc[pos:pos] = new_entries
+        else:
+            for entry in new_entries:
+                _insert_sorted_by_page(toc, entry)
+
+        write_toc(doc, toc, args.output)
+        added, final_count = len(new_entries), len(toc)
+    finally:
+        doc.close()
+    print(f"Added {added} bookmark(s); {final_count} total -> {args.output}")
+
+
+def _delete_keep_children(toc: list, sel: set) -> list:
+    """Remove selected rows but keep descendants, promoting them to stay valid.
+
+    Each kept row's level is reduced by the number of its deleted ancestors, so
+    orphaned children move up to fill the gap left by a removed parent.
+    """
+    result = []
+    stack: list = []  # ancestor path as (level, is_deleted)
+    for i, entry in enumerate(toc):
+        level = entry[0]
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        deleted_ancestors = sum(1 for lvl, dele in stack if dele)
+        is_deleted = i in sel
+        stack.append((level, is_deleted))
+        if not is_deleted:
+            new_level = max(1, level - deleted_ancestors)
+            result.append([new_level, entry[1], entry[2]])
+    return result
+
+
+def cmd_bm_delete(args: argparse.Namespace) -> None:
+    default_bookmark_output(args)
+    ensure_not_input(args.output, args.input)
+    doc = open_pdf(args.input)
+    try:
+        toc = [list(e) for e in get_bookmarks(doc)]
+        if args.all:
+            new_toc: list = []
+        else:
+            if not args.index:
+                raise ValueError("Specify --index SPEC (e.g. '2,4-6') or --all.")
+            if not toc:
+                raise ValueError("Document has no bookmarks to delete.")
+            sel = set(parse_index_spec(args.index, len(toc)))
+            if not sel:
+                raise ValueError("No bookmarks selected by --index.")
+            if args.keep_children:
+                new_toc = _delete_keep_children(toc, sel)
+            else:
+                remove = set(sel)
+                for i in sel:
+                    base = toc[i][0]
+                    j = i + 1
+                    while j < len(toc) and toc[j][0] > base:
+                        remove.add(j)
+                        j += 1
+                new_toc = [list(e) for k, e in enumerate(toc) if k not in remove]
+        removed = len(toc) - len(new_toc)
+        if removed == 0:
+            raise ValueError("No bookmarks were removed.")
+        write_toc(doc, new_toc, args.output)
+        remaining = len(new_toc)
+    finally:
+        doc.close()
+    print(f"Deleted {removed} bookmark(s); {remaining} remaining -> {args.output}")
+
+
+def cmd_bm_update(args: argparse.Namespace) -> None:
+    if args.title is None and args.page is None and args.level is None:
+        raise ValueError("Specify at least one of --title, --page, --level.")
+    default_bookmark_output(args)
+    ensure_not_input(args.output, args.input)
+    doc = open_pdf(args.input)
+    try:
+        toc = [list(e) for e in get_bookmarks(doc)]
+        if not toc:
+            raise ValueError("Document has no bookmarks to update.")
+        sel = parse_index_spec(args.index, len(toc))
+        if not sel:
+            raise ValueError("No bookmarks selected by --index.")
+        for i in sel:
+            if args.title is not None:
+                toc[i][1] = args.title
+            if args.page is not None:
+                toc[i][2] = args.page
+            if args.level is not None:
+                toc[i][0] = args.level
+        write_toc(doc, toc, args.output)
+        n = len(sel)
+    finally:
+        doc.close()
+    print(f"Updated {n} bookmark(s) -> {args.output}")
+
+
+def _toc_row_from_json(item: object, n: int) -> list:
+    """Build a [level, title, page(, dest)] TOC row from one JSON entry."""
+    if isinstance(item, dict):
+        for key in ("level", "title", "page"):
+            if key not in item:
+                raise ValueError(f"bookmark entry {n}: missing '{key}'.")
+        level, title, page, dest = item["level"], item["title"], item["page"], item.get("dest")
+    elif isinstance(item, (list, tuple)):
+        if len(item) < 3:
+            raise ValueError(f"bookmark entry {n}: array must be [level, title, page].")
+        level, title, page = item[0], item[1], item[2]
+        dest = item[3] if len(item) > 3 else None
+    else:
+        raise ValueError(f"bookmark entry {n}: must be a JSON object or array.")
+    if not isinstance(level, int) or not isinstance(page, int):
+        raise ValueError(f"bookmark entry {n}: 'level' and 'page' must be integers.")
+    title = str(title)
+    if isinstance(dest, dict):
+        clean = dict(dest)
+        to = clean.get("to")
+        if isinstance(to, (list, tuple)) and len(to) == 2:
+            clean["to"] = pymupdf.Point(float(to[0]), float(to[1]))
+        return [level, title, page, clean]
+    return [level, title, page]
+
+
+def cmd_bm_import(args: argparse.Namespace) -> None:
+    default_bookmark_output(args)
+    ensure_not_input(args.output, args.input)
+    if args.source == "-":
+        text = sys.stdin.read()
+    else:
+        if not os.path.exists(args.source):
+            raise FileNotFoundError(args.source)
+        with open(args.source, encoding="utf-8") as fh:
+            text = fh.read()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON: {exc}")
+    if not isinstance(data, list):
+        raise ValueError("Bookmark JSON must be a list of entries.")
+    toc = [_toc_row_from_json(item, i + 1) for i, item in enumerate(data)]
+    doc = open_pdf(args.input)
+    try:
+        write_toc(doc, toc, args.output)
+        count = len(toc)
+    finally:
+        doc.close()
+    src = "stdin" if args.source == "-" else f"'{args.source}'"
+    print(f"Imported {count} bookmark(s) from {src} -> {args.output}")
+
+
 def cmd_nup(args: argparse.Namespace) -> None:
     nup(args)
 
@@ -869,6 +1204,118 @@ def build_parser() -> argparse.ArgumentParser:
     inf.add_argument("-i", "--input", required=True, help="Input PDF path.")
     inf.add_argument("--per-page", action="store_true", help="List each page's size and rotation.")
     inf.set_defaults(func=cmd_info)
+
+    bm = sub.add_parser(
+        "bookmark",
+        help="Read or edit PDF bookmarks (outline / table of contents).",
+        description=(
+            "Read or edit PDF bookmarks (the outline / table of contents). Actions: "
+            "list, add, delete, update, export, import. Bookmarks form a tree via "
+            "1-based levels: the first must be level 1 and each level may only step up "
+            "by 1. Editing actions write a new file; the input is never overwritten."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    bsub = bm.add_subparsers(dest="bookmark_command", required=True)
+
+    bl = bsub.add_parser(
+        "list",
+        help="Print the current bookmarks.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    bl.add_argument("-i", "--input", required=True, help="Input PDF path.")
+    bl.add_argument("--json", action="store_true", help="Output as JSON instead of an indented tree.")
+    bl.set_defaults(func=cmd_bm_list)
+
+    ba = bsub.add_parser(
+        "add",
+        help="Add one or more bookmarks.",
+        description=(
+            "Add one or more bookmarks (repeat --add for several). By default each new "
+            "bookmark is inserted so the list stays ordered by page; use --at to place "
+            "them at an explicit position. For complex nested trees use 'bookmark import'."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    ba.add_argument("-i", "--input", required=True, help="Input PDF path.")
+    ba.add_argument("-o", "--output", help="Output PDF (default: <input>_bookmarks.pdf).")
+    ba.add_argument(
+        "--add", action="append", nargs=3, metavar=("PAGE", "LEVEL", "TITLE"),
+        help="Add a bookmark to 1-based PAGE at hierarchy LEVEL (1=top) titled TITLE. "
+             "Repeatable; quote TITLE if it has spaces. Use PAGE -1 for no destination.",
+    )
+    ba.add_argument(
+        "--at", type=int,
+        help="Insert the new bookmark(s) at this 1-based position instead of by page order.",
+    )
+    ba.set_defaults(func=cmd_bm_add)
+
+    bd = bsub.add_parser(
+        "delete",
+        help="Delete bookmarks by index, or all of them.",
+        description=(
+            "Delete bookmarks selected by --index (1-based, e.g. '2,4-6'), or all of "
+            "them with --all. By default a deleted bookmark also removes its children "
+            "(its whole subtree); use --keep-children to promote children up one level."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    bd.add_argument("-i", "--input", required=True, help="Input PDF path.")
+    bd.add_argument("-o", "--output", help="Output PDF (default: <input>_bookmarks.pdf).")
+    bd.add_argument("--index", help="1-based bookmark index/indices to delete, e.g. '3' or '2,4-6'.")
+    bd.add_argument("--all", action="store_true", help="Delete every bookmark (clear the outline).")
+    bd.add_argument(
+        "--keep-children", action="store_true",
+        help="Promote children instead of deleting the whole subtree.",
+    )
+    bd.set_defaults(func=cmd_bm_delete)
+
+    bu = bsub.add_parser(
+        "update",
+        help="Change title/page/level of existing bookmarks.",
+        description=(
+            "Update existing bookmarks selected by --index (1-based, e.g. '2,4-6'); "
+            "apply any of --title/--page/--level to all selected entries. For distinct "
+            "per-entry edits, use 'bookmark export', edit the JSON, then 'bookmark import'."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    bu.add_argument("-i", "--input", required=True, help="Input PDF path.")
+    bu.add_argument("-o", "--output", help="Output PDF (default: <input>_bookmarks.pdf).")
+    bu.add_argument("--index", required=True, help="1-based bookmark index/indices to update, e.g. '3' or '2,4-6'.")
+    bu.add_argument("--title", help="New title.")
+    bu.add_argument("--page", type=int, help="New 1-based page (or -1 for no destination).")
+    bu.add_argument("--level", type=int, help="New hierarchy level (1=top).")
+    bu.set_defaults(func=cmd_bm_update)
+
+    be = bsub.add_parser(
+        "export",
+        help="Export bookmarks to a JSON file.",
+        description="Export the bookmarks as JSON (default: <input>_bookmarks.json; use -o - for stdout).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    be.add_argument("-i", "--input", required=True, help="Input PDF path.")
+    be.add_argument("-o", "--output", help="Output JSON path, or '-' for stdout (default: <input>_bookmarks.json).")
+    be.add_argument(
+        "--details", action="store_true",
+        help="Include destination details (position/zoom) for higher-fidelity round-trips.",
+    )
+    be.set_defaults(func=cmd_bm_export)
+
+    bi = bsub.add_parser(
+        "import",
+        help="Replace bookmarks from a JSON file.",
+        description=(
+            "Replace ALL bookmarks with the contents of a JSON file (as produced by "
+            "'bookmark export'). Entries may be objects {level,title,page[,dest]} or "
+            "[level, title, page] arrays."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    bi.add_argument("-i", "--input", required=True, help="Input PDF path.")
+    bi.add_argument("-o", "--output", help="Output PDF (default: <input>_bookmarks.pdf).")
+    bi.add_argument("--from", dest="source", required=True, metavar="FILE", help="JSON file to import (or '-' for stdin).")
+    bi.set_defaults(func=cmd_bm_import)
 
     return p
 

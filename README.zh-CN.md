@@ -4,7 +4,7 @@
 
 一个基于 PyMuPDF 的命令行工具，包含用于 **N-up（多页合一）** 拼版和日常 PDF
 页面操作的子命令：`nup`、`merge`、`extract`、`delete`、`reorder`、`split`、
-`rotate`、`info`。
+`rotate`、`info`，以及 `bookmark`（读取/编辑书签大纲）。
 
 **`nup`** 子命令将 PDF 的多个页面按 **m 行 × n 列** 的网格合并到单个输出页面上。
 每个源页面在保持其纵横比的前提下，被尽可能放大以填满所在的网格单元（**自动适配**），
@@ -159,6 +159,7 @@ python3 pdf_tool.py info -i in.pdf --per-page
 | `split` | 一个 PDF → 多个 | `-i`、`--every N` \| `--ranges`、`--outdir` |
 | `rotate` | 旋转整个文件或子集 | `-i`、`--cw`/`--ccw`/`--flip` 或 `--angle`、`-p/--pages`、`--absolute`、`-o` |
 | `info` | 显示页数/尺寸/元数据 | `-i`、`--per-page` |
+| `bookmark` | 读取/编辑书签大纲（目录） | `list` / `add` / `delete` / `update` / `export` / `import`（见[书签](#书签pdf_toolpy-bookmark)） |
 
 ### 在大型 PDF 中重排少量页面
 
@@ -197,6 +198,54 @@ python3 pdf_tool.py reorder -i big.pdf --move 800:end
   错误提示。Pillow 是**可选的**，不属于锁定的依赖。
 
 运行 `python3 pdf_tool.py <command> -h` 可查看任意命令的完整选项列表。
+
+## 书签（`pdf_tool.py bookmark`）
+
+通过 `bookmark` 子命令读取和编辑 PDF 的**书签**（大纲 / 目录）。书签通过从 1
+开始的 `level`（层级）构成一棵**树**：第一个书签必须是 level 1，且每个层级一次
+只能加深 1 级（`1 -> 2`，不能 `1 -> 3`）。页码从 1 开始计数；用 `-1` 表示没有页面
+目标的书签。每个编辑操作都会写入一个**新**文件——输入文件永远不会被覆盖
+（默认输出 `<input>_bookmarks.pdf`）。
+
+```bash
+# 读取当前书签（带 1 开始索引的缩进树）
+python3 pdf_tool.py bookmark list -i in.pdf
+# ……或以 JSON 输出
+python3 pdf_tool.py bookmark list -i in.pdf --json
+
+# 添加一个或多个书签：--add PAGE LEVEL "TITLE"（可重复）
+python3 pdf_tool.py bookmark add -i in.pdf \
+    --add 1 1 "封面" --add 2 1 "第 1 章" --add 3 2 "第 1.1 节"
+# 按显式位置插入，而非按页码顺序
+python3 pdf_tool.py bookmark add -i in.pdf --add 10 1 "附录" --at 1
+
+# 按 1 开始的索引删除（删除一个书签会连同其子项一起删除）
+python3 pdf_tool.py bookmark delete -i in.pdf --index 2,4-6
+python3 pdf_tool.py bookmark delete -i in.pdf --index 2 --keep-children  # 提升子项
+python3 pdf_tool.py bookmark delete -i in.pdf --all                      # 清空全部
+
+# 更新所选书签的标题/页码/层级
+python3 pdf_tool.py bookmark update -i in.pdf --index 3 --title "新标题"
+python3 pdf_tool.py bookmark update -i in.pdf --index 2,5 --level 2
+
+# 导出为 JSON，编辑后再导入以替换整个大纲
+python3 pdf_tool.py bookmark export -i in.pdf -o toc.json
+python3 pdf_tool.py bookmark import -i in.pdf --from toc.json -o out.pdf
+```
+
+| 操作 | 用途 | 主要选项 |
+| --- | --- | --- |
+| `list` | 打印大纲（缩进树或 JSON） | `-i`、`--json` |
+| `add` | 添加一个或多个书签 | `-i`、`--add PAGE LEVEL TITLE`（可重复）、`--at`、`-o` |
+| `delete` | 删除书签（默认连同子树） | `-i`、`--index` \| `--all`、`--keep-children`、`-o` |
+| `update` | 修改标题/页码/层级 | `-i`、`--index`、`--title`/`--page`/`--level`、`-o` |
+| `export` | 把大纲导出为 JSON | `-i`、`-o`（`-` 表示标准输出）、`--details` |
+| `import` | 从 JSON 替换大纲 | `-i`、`--from FILE`（`-` 表示标准输入）、`-o` |
+
+少量的单个或几个改动，直接用 `add`/`delete`/`update` 即可。若要构建或重组**深层
+嵌套**的大纲，建议使用 `export` -> 编辑 -> `import` 的往返流程：导出时每个书签写成
+一个 JSON 对象 `{level, title, page}`（加 `--details` 还会记录每个目标的位置/缩放），
+`import` 会校验并一次性替换整个大纲。
 
 ## 依赖
 

@@ -4,7 +4,7 @@
 
 A single PyMuPDF-based CLI with subcommands for **N-up** layout and everyday PDF
 page operations: `nup`, `merge`, `extract`, `delete`, `reorder`, `split`,
-`rotate`, `info`.
+`rotate`, `info`, and `bookmark` (read/edit the outline).
 
 The **`nup`** subcommand combines multiple pages of a PDF onto single output
 pages in an **m rows × n columns** grid. Each source page is scaled as large as
@@ -164,6 +164,7 @@ python3 pdf_tool.py info -i in.pdf --per-page
 | `split` | One PDF → many | `-i`, `--every N` \| `--ranges`, `--outdir` |
 | `rotate` | Rotate whole file or subset | `-i`, `--cw`/`--ccw`/`--flip` or `--angle`, `-p/--pages`, `--absolute`, `-o` |
 | `info` | Show pages/sizes/metadata | `-i`, `--per-page` |
+| `bookmark` | Read/edit the outline (TOC) | `list` / `add` / `delete` / `update` / `export` / `import` (see [Bookmarks](#bookmarks-pdf_toolpy-bookmark)) |
 
 ### Reordering a few pages in a large PDF
 
@@ -208,6 +209,56 @@ valid for PDFs, not images.
   dependencies.
 
 Run `python3 pdf_tool.py <command> -h` for the full option list of any command.
+
+## Bookmarks (`pdf_tool.py bookmark`)
+
+Read and edit a PDF's **bookmarks** (the outline / table of contents) through
+the `bookmark` subcommand. Bookmarks form a **tree** encoded by a 1-based
+`level`: the first bookmark must be level 1 and each level may only step up by 1
+(`1 -> 2`, never `1 -> 3`). Pages are 1-based; use `-1` for a bookmark with no
+page destination. Every editing action writes a **new** file — the input is
+never overwritten (default output `<input>_bookmarks.pdf`).
+
+```bash
+# Read the current bookmarks (indented tree with 1-based indices)
+python3 pdf_tool.py bookmark list -i in.pdf
+# ... or as JSON
+python3 pdf_tool.py bookmark list -i in.pdf --json
+
+# Add one or more bookmarks: --add PAGE LEVEL "TITLE" (repeatable)
+python3 pdf_tool.py bookmark add -i in.pdf \
+    --add 1 1 "Cover" --add 2 1 "Chapter 1" --add 3 2 "Section 1.1"
+# Insert at an explicit position instead of by page order
+python3 pdf_tool.py bookmark add -i in.pdf --add 10 1 "Appendix" --at 1
+
+# Delete by 1-based index (a deleted bookmark takes its children with it)
+python3 pdf_tool.py bookmark delete -i in.pdf --index 2,4-6
+python3 pdf_tool.py bookmark delete -i in.pdf --index 2 --keep-children  # promote kids
+python3 pdf_tool.py bookmark delete -i in.pdf --all                      # clear all
+
+# Update title/page/level of selected bookmarks
+python3 pdf_tool.py bookmark update -i in.pdf --index 3 --title "New title"
+python3 pdf_tool.py bookmark update -i in.pdf --index 2,5 --level 2
+
+# Export to JSON, edit it, then import to replace the whole outline
+python3 pdf_tool.py bookmark export -i in.pdf -o toc.json
+python3 pdf_tool.py bookmark import -i in.pdf --from toc.json -o out.pdf
+```
+
+| Action | Purpose | Key options |
+| --- | --- | --- |
+| `list` | Print the outline (indented tree or JSON) | `-i`, `--json` |
+| `add` | Add one or more bookmarks | `-i`, `--add PAGE LEVEL TITLE` (repeatable), `--at`, `-o` |
+| `delete` | Remove bookmarks (subtree by default) | `-i`, `--index` \| `--all`, `--keep-children`, `-o` |
+| `update` | Change title/page/level | `-i`, `--index`, `--title`/`--page`/`--level`, `-o` |
+| `export` | Dump the outline to JSON | `-i`, `-o` (`-` for stdout), `--details` |
+| `import` | Replace the outline from JSON | `-i`, `--from FILE` (`-` for stdin), `-o` |
+
+For quick single or few edits, use `add`/`delete`/`update` directly. For building
+or restructuring a **deeply nested** outline, prefer the `export` -> edit ->
+`import` round-trip: export writes one JSON object `{level, title, page}` per
+bookmark (add `--details` to also capture each destination's position/zoom), and
+`import` validates and replaces the entire outline in one shot.
 
 ## Dependencies
 
